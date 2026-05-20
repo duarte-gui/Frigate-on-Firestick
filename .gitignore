@@ -1,0 +1,31 @@
+# Build
+build/
+.gradle/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.project
+.classpath
+.settings/
+
+# Keystore (NUNCA committar)
+*.jks
+*.keystore
+key.properties
+local.properties
+
+# OS
+.DS_Store
+Thumbs.db
+*~
+
+# Logs
+*.log
+captures/
