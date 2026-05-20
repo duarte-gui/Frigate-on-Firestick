@@ -2,6 +2,8 @@
 
 App Android leve (~44 KB) que exibe câmeras do [Frigate NVR](https://github.com/blakeblackshear/frigate) na Fire TV via **WebRTC**, com troca entre câmeras pelo controle remoto.
 
+📦 **Download:** [Release v0.6 (APK)](https://github.com/duarte-gui/Frigate-on-Firestick/releases/latest)
+
 ## Por que existe
 
 O Fire TV usa **Amazon WebView**, que desabilita MSE (Media Source Extensions) por padrão (`--disable-webkit-media-source`). Isso quebra o live view padrão do Frigate, que tenta tocar `fmp4/h264` via `<video>`. Resultado: snapshot estático sem vídeo ao vivo.
@@ -75,10 +77,12 @@ APK gerado em:
 
 2. Descubra o IP do Fire TV (Configurações → Rede).
 
-3. Instale:
+3. Baixe o APK do [release mais recente](https://github.com/duarte-gui/Frigate-on-Firestick/releases/latest) (ou compile você mesmo — ver seção [Build](#build)).
+
+4. Instale:
 ```bash
 adb connect FIRE_TV_IP:5555
-adb install app/build/outputs/apk/release/app-release.apk
+adb install frigate-tv-v0.6.apk
 ```
 
 O app aparece como **"Câmeras"** na lista de apps do Fire TV.
