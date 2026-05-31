@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Tema translúcido: durante o breve "flash" de tela cheia (obrigatório no
+         Android 9 antes de entrar em PIP), a janela é transparente, deixando
+         aparecer o app que está atrás em vez de uma tela preta. -->
+    <style name="TransparentPip" parent="@android:style/Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:colorBackgroundCacheHint">@null</item>
+    </style>
+</resources>

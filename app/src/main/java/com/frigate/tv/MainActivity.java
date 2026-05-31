@@ -1,9 +1,18 @@
 package com.frigate.tv;
 
 import android.app.Activity;
+import android.app.PictureInPictureParams;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.res.Configuration;
+import android.media.session.MediaSession;
+import android.media.session.PlaybackState;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
+import android.util.Rational;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
@@ -32,6 +41,8 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
 
+    private static final String TAG = "FrigateTV";
+
     private static final String WEBRTC_PATH = "/live/webrtc/webrtc.html?src=";
     private static final String CONFIG_PATH = "/api/config";
 
@@ -42,15 +53,46 @@ public class MainActivity extends Activity {
     private static final List<String> FALLBACK_CAMERAS =
         Arrays.asList("rua", "frente_praia", "frente_rua");
 
+    // Extras de intent para abrir direto em PIP (usado p/ ex. por Home Assistant):
+    //   am start -n com.frigate.tv/.MainActivity --ez pip true --es cam garagem_sub
+    private static final String EXTRA_PIP = "pip";
+    private static final String EXTRA_CAM = "cam";
+
     private WebView webView;
     private TextView cameraLabel;
     private final Handler labelHandler = new Handler(Looper.getMainLooper());
+    private final Handler pipHandler = new Handler(Looper.getMainLooper());
 
     // Lista de câmeras (nome amigável) na ordem em que aparecem no Frigate
     private List<String> cameras = new ArrayList<>();
     // Mapping câmera → nome do stream go2rtc a usar no WebRTC
     private Map<String, String> cameraToStream = new LinkedHashMap<>();
     private int currentCamera = 0;
+
+    // Câmera pedida via extra (carregada quando a lista terminar de baixar)
+    private String pendingCam = null;
+    // Se true, entra em PIP automaticamente no próximo onResume
+    private boolean enterPipOnResume = false;
+
+    // Watchdog do PIP: no Fire TV Lite (Android 9) não há setAutoEnterEnabled, e
+    // com janela translúcida o sistema às vezes descarta o PIP segundos depois
+    // (traz o app de conteúdo de volta). Em vez de tentar uma vez, vigiamos por
+    // uma janela de tempo e RE-SUBIMOS o PIP sempre que ele cair — enquanto a
+    // Activity ainda estiver em foreground/PIP (de background não dá pra entrar).
+    private static final long PIP_DELAY_MS = 200;       // 1ª tentativa após o resume
+    private static final long PIP_WATCH_MS = 1200;      // intervalo de vigilância
+    private static final long PIP_WATCH_WINDOW_MS = 15000; // por quanto tempo vigiar
+    private static final int MAX_REENTRIES = 6;         // trava anti-flicker
+    private boolean pipDesired = false;     // queremos estar em PIP?
+    private boolean activityStarted = false; // entre onStart e onStop
+    private long pipWatchUntil = 0;
+    private int pipReentries = 0;
+
+    // O PipManager do Fire TV SÓ mantém a janelinha de PIP para apps com uma
+    // MediaSession ativa. Sem ela, o sistema fecha o PIP em ~2s
+    // (log: PipManager onPipActivityClosed / token=null). Mantemos uma sessão
+    // "tocando" enquanto a câmera está na tela.
+    private MediaSession mediaSession;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -66,6 +108,10 @@ public class MainActivity extends Activity {
         webView = findViewById(R.id.webview);
         cameraLabel = findViewById(R.id.cameraLabel);
         frigateHost = getString(R.string.frigate_host);
+
+        // Fundo transparente durante o flash de tela cheia (deixa ver o app
+        // atrás). Ao firmar em PIP, volta a preto p/ a janelinha não vazar.
+        webView.setBackgroundColor(0x00000000);
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -100,8 +146,132 @@ public class MainActivity extends Activity {
         });
         webView.setWebChromeClient(new WebChromeClient());
 
+        setupMediaSession();
+
+        readIntentExtras(getIntent());
+
         showCameraLabel("Carregando câmeras…");
         fetchCamerasAsync();
+        // PIP é entrado no onResume (estado garantido como resumed).
+    }
+
+    // singleTask: quando o app já está aberto e recebe novo intent (ex.: HA
+    // pedindo outra câmera em PIP), cai aqui em vez de criar nova Activity.
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        readIntentExtras(intent);
+        if (pendingCam != null && !cameras.isEmpty()) {
+            loadCameraByName(pendingCam);
+            pendingCam = null;
+        }
+        // onResume virá em seguida e trata o PIP.
+    }
+
+    private void readIntentExtras(Intent intent) {
+        if (intent == null) return;
+        boolean pip = intent.getBooleanExtra(EXTRA_PIP, false);
+        String cam = intent.getStringExtra(EXTRA_CAM);
+        if (cam != null && !cam.trim().isEmpty()) pendingCam = cam.trim();
+        if (pip) enterPipOnResume = true;
+        Log.i(TAG, "readIntentExtras: pip=" + pip + " cam=" + cam
+                + " supportsPip=" + supportsPip());
+    }
+
+    // MediaSession "tocando" — exigida pelo Fire TV para o PIP não fechar.
+    private void setupMediaSession() {
+        try {
+            mediaSession = new MediaSession(this, "FrigateTV");
+            PlaybackState state = new PlaybackState.Builder()
+                .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE
+                          | PlaybackState.ACTION_STOP)
+                .setState(PlaybackState.STATE_PLAYING, 0, 1.0f)
+                .build();
+            mediaSession.setPlaybackState(state);
+            mediaSession.setCallback(new MediaSession.Callback() {});
+            mediaSession.setActive(true);
+            Log.i(TAG, "MediaSession ativa");
+        } catch (Throwable t) {
+            Log.e(TAG, "setupMediaSession FAILED", t);
+        }
+    }
+
+    private boolean supportsPip() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+            && getPackageManager().hasSystemFeature(
+                   PackageManager.FEATURE_PICTURE_IN_PICTURE);
+    }
+
+    private boolean isInPip() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode();
+    }
+
+    // Inicia o ciclo: pede PIP e arma o watchdog por PIP_WATCH_WINDOW_MS.
+    private void startPipWatch() {
+        pipDesired = true;
+        pipReentries = 0;
+        pipWatchUntil = android.os.SystemClock.uptimeMillis() + PIP_WATCH_WINDOW_MS;
+        enterPipMode();
+        pipHandler.removeCallbacks(pipWatchRunnable);
+        pipHandler.postDelayed(pipWatchRunnable, PIP_WATCH_MS);
+    }
+
+    private void enterPipMode() {
+        boolean inPip = isInPip();
+        Log.i(TAG, "enterPipMode supportsPip=" + supportsPip() + " inPip=" + inPip
+                + " started=" + activityStarted + " reentries=" + pipReentries);
+        if (!supportsPip() || inPip || !activityStarted) return;
+        try {
+            PictureInPictureParams params = new PictureInPictureParams.Builder()
+                .setAspectRatio(new Rational(16, 9))
+                .build();
+            boolean ok = enterPictureInPictureMode(params);
+            Log.i(TAG, "enterPictureInPictureMode returned " + ok);
+        } catch (Throwable t) {
+            Log.e(TAG, "enterPictureInPictureMode FAILED", t);
+        }
+    }
+
+    private final Runnable pipWatchRunnable = new Runnable() {
+        @Override public void run() {
+            if (!pipDesired) return;
+            long now = android.os.SystemClock.uptimeMillis();
+            if (now > pipWatchUntil) {
+                Log.i(TAG, "watchdog: janela encerrada (inPip=" + isInPip() + ")");
+                return;
+            }
+            if (!isInPip()) {
+                if (!activityStarted) {
+                    // Backgrounded: não dá pra re-entrar daqui; só continua vigiando.
+                    Log.i(TAG, "watchdog: PIP caiu mas Activity em background; aguardando");
+                } else if (pipReentries < MAX_REENTRIES) {
+                    pipReentries++;
+                    Log.i(TAG, "watchdog: PIP caiu; re-subindo (" + pipReentries + "/"
+                            + MAX_REENTRIES + ")");
+                    enterPipMode();
+                } else {
+                    Log.w(TAG, "watchdog: limite de re-subidas atingido; parando");
+                    pipDesired = false;
+                    return;
+                }
+            }
+            pipHandler.postDelayed(this, PIP_WATCH_MS);
+        }
+    };
+
+    @Override
+    public void onPictureInPictureModeChanged(boolean isInPip, Configuration newConfig) {
+        super.onPictureInPictureModeChanged(isInPip, newConfig);
+        if (isInPip) {
+            // Na janelinha: fundo preto (sem vazar transparência) e sem rótulo.
+            webView.setBackgroundColor(0xFF000000);
+            labelHandler.removeCallbacksAndMessages(null);
+            cameraLabel.setVisibility(View.INVISIBLE);
+        } else {
+            // Voltou a fullscreen: transparente de novo p/ o próximo flash.
+            webView.setBackgroundColor(0x00000000);
+        }
     }
 
     private void fetchCamerasAsync() {
@@ -116,9 +286,50 @@ public class MainActivity extends Activity {
                     cameraToStream = result;
                 }
                 cameras = new ArrayList<>(cameraToStream.keySet());
-                loadCamera(0);
+                if (pendingCam != null) {
+                    loadCameraByName(pendingCam);
+                    pendingCam = null;
+                } else {
+                    loadCamera(0);
+                }
             });
         });
+    }
+
+    // Carrega o que foi pedido via extra "cam". Aceita:
+    //  1. nome de câmera (ex.: "Garagem") -> usa o stream mapeado da câmera
+    //  2. nome de stream go2rtc (ex.: "garagem_sub", "porta_frente_2") -> casa
+    //     pelo stream mapeado; se não bater nenhum, carrega o stream DIRETO
+    //     (o HA passa nomes de stream, e a câmera "Garagem" mapeia p/ _main,
+    //      então pedir "garagem_sub" não casa pelo mapeamento e cairia no
+    //      fallback errado — por isso o carregamento direto).
+    private void loadCameraByName(String wanted) {
+        if (cameras.isEmpty()) return;
+        String w = wanted.toLowerCase();
+        for (int i = 0; i < cameras.size(); i++) {
+            String name = cameras.get(i);
+            String stream = cameraToStream.get(name);
+            if (name.toLowerCase().equals(w)
+                    || (stream != null && stream.toLowerCase().equals(w))) {
+                loadCamera(i);
+                return;
+            }
+        }
+        // Não casou nenhuma câmera/stream mapeado: trata "wanted" como nome de
+        // stream go2rtc e carrega direto. Alinha currentCamera à câmera de mesmo
+        // prefixo (p/ navegação ←/→ continuar coerente), se houver.
+        loadStreamDirect(wanted);
+    }
+
+    private void loadStreamDirect(String stream) {
+        String w = stream.toLowerCase();
+        for (int i = 0; i < cameras.size(); i++) {
+            String cam = cameras.get(i).toLowerCase();
+            if (w.equals(cam) || w.startsWith(cam + "_")) { currentCamera = i; break; }
+        }
+        webView.loadUrl(frigateHost + WEBRTC_PATH + stream);
+        showCameraLabel(prettyName(stream));
+        Log.i(TAG, "loadStreamDirect: " + stream);
     }
 
     // Retorna map preservando ordem: nome_da_câmera → stream_go2rtc
@@ -258,10 +469,32 @@ public class MainActivity extends Activity {
         return super.dispatchKeyEvent(event);
     }
 
-    @Override protected void onResume()  { super.onResume();  webView.onResume(); }
-    @Override protected void onPause()   { super.onPause();   webView.onPause(); }
+    @Override protected void onStart() { super.onStart(); activityStarted = true; }
+    @Override protected void onStop()  { super.onStop();  activityStarted = false; }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        webView.onResume();
+        if (enterPipOnResume) {
+            enterPipOnResume = false;
+            // delay curto p/ minimizar o flash; o watchdog re-sobe se cair
+            pipHandler.postDelayed(this::startPipWatch, PIP_DELAY_MS);
+        }
+    }
+    @Override protected void onPause() {
+        super.onPause();
+        // Em PIP a Activity fica "paused" mas visível: NÃO pausar o WebView,
+        // senão o vídeo da câmera congela na janelinha.
+        if (!isInPip()) webView.onPause();
+    }
     @Override protected void onDestroy() {
         labelHandler.removeCallbacksAndMessages(null);
+        pipHandler.removeCallbacksAndMessages(null);
+        if (mediaSession != null) {
+            mediaSession.setActive(false);
+            mediaSession.release();
+        }
         webView.destroy();
         super.onDestroy();
     }

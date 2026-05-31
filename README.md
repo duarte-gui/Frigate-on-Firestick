@@ -15,7 +15,29 @@ Este app contorna isso apontando direto pra `/live/webrtc/webrtc.html` do go2rtc
 - Lista de câmeras carregada **dinamicamente** do `/api/config` (não precisa recompilar pra adicionar câmera nova)
 - Troca entre câmeras com **← →** do D-pad
 - Resolução automática do stream go2rtc por câmera (busca `<nome>`, `<nome>_main`, `<nome>_sub`, case-insensitive)
+- **Picture-in-Picture (PIP)** — abre a câmera numa janelinha flutuante por cima de qualquer app (ex.: enquanto assiste a um vídeo)
 - Sem dependências externas — só WebView nativo do Android
+
+## Picture-in-Picture (PIP)
+
+Dá pra abrir uma câmera direto em PIP via intent (útil pra acionar pelo Home Assistant, Alexa, ou um botão de dashboard):
+
+```bash
+# liga o PIP com uma câmera/stream específico
+adb shell "am start -n com.frigate.tv/.MainActivity --ez pip true --es cam garagem_sub"
+
+# desliga
+adb shell "am force-stop com.frigate.tv"
+```
+
+Extras aceitos:
+- `--ez pip true` → entra em PIP automaticamente ao abrir
+- `--es cam <nome>` → nome da câmera **ou** do stream go2rtc (ex.: `garagem_sub`, `porta_frente_2`, `rua`)
+
+Detalhes de implementação (Fire TV / Android 9):
+- Usa `MediaSession` ativa — sem ela o Fire TV descarta o PIP após poucos segundos.
+- Tema translúcido (`TransparentPip`) disfarça o breve flash de tela cheia exigido pelo Android antes de entrar em PIP (`setAutoEnterEnabled` só existe no Android 12+).
+- Watchdog re-sobe o PIP automaticamente caso o sistema o descarte.
 
 ## Controle remoto
 
