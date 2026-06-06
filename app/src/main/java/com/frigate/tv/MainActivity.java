@@ -198,9 +198,11 @@ public class MainActivity extends Activity {
     }
 
     private boolean supportsPip() {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-            && getPackageManager().hasSystemFeature(
-                   PackageManager.FEATURE_PICTURE_IN_PICTURE);
+        // Alguns Android TV (ex.: Xiaomi TV Stick / twilight) suportam PIP mas
+        // NÃO declaram FEATURE_PICTURE_IN_PICTURE no pm. Em vez de confiar só na
+        // feature, exigimos SDK>=O e deixamos o enterPictureInPictureMode tentar;
+        // se o sistema recusar, ele lança/retorna false e tratamos lá.
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O;
     }
 
     private boolean isInPip() {
